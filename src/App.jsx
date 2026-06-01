@@ -1,5 +1,5 @@
 // src/App.jsx
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import Login from './pages/LoginPage';
 import PrivateRoute from './assets/components/PrivateRoute';
@@ -18,10 +18,12 @@ function App() {
       <BrowserRouter>
         <Routes>
           {/* Public Routes */}
+          <Route path="/" element={<Navigate to="/login" replace />} />
+
           <Route path="/login" element={<Login />} />
 
           {/* Protected Admin Routes */}
-          <Route path="/" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
+          <Route path="/dashboard" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
           <Route path="/admin/leads" element={<PrivateRoute><PaymentPage /></PrivateRoute>} />
           <Route path="/admin/paid-clients" element={<PrivateRoute><PaidClients /></PrivateRoute>} />
           <Route path="/admin/all-users" element={<PrivateRoute><AllUsers /></PrivateRoute>} />
