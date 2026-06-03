@@ -60,7 +60,6 @@ const FONTS = [
 const RESIZE_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const MIN_SIZE = { text: { w: 96, h: 56 }, html: { w: 96, h: 56 }, image: { w: 48, h: 40 } };
 
-// Modified to support onMouseDown for focus preservation
 const ToolbarButton = ({ icon: Icon, label, active, disabled, onClick, onMouseDown, title, primary }) => (
   <button
     type="button"
@@ -98,7 +97,6 @@ const EditableSurface = ({ element, selected, onFocus, onHtmlChange }) => {
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
-    // Do NOT overwrite innerHTML if this node is currently focused – preserves cursor position
     if (document.activeElement === node) return;
     const nextHtml = element.html || '<p></p>';
     if (node.innerHTML !== nextHtml) node.innerHTML = nextHtml;
@@ -165,25 +163,36 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   const lastEmittedRef = useRef('');
   const pastRef = useRef([]);
   const futureRef = useRef([]);
-  // Used to save selection before commands that open prompts (e.g., link insertion)
   const savedRange = useRef(null);
+  // ========== FIX: prevent infinite loop ==========
+  const lastExternalContentRef = useRef(content);
+  const isInternalChange = useRef(false);
 
   useEffect(() => {
     docRef.current = doc;
   }, [doc]);
 
+  // Sync external content only when it truly comes from outside
   useEffect(() => {
     if (typeof content !== 'string') return;
     if (content === lastEmittedRef.current) return;
+    // If the change originated from inside the editor, ignore the sync
+    if (isInternalChange.current) return;
     setDoc(decodeDocumentFromHtml(content));
     pastRef.current = [];
     futureRef.current = [];
+    lastExternalContentRef.current = content;
   }, [content]);
 
+  // When doc changes, emit serialized content (mark as internal change)
   useEffect(() => {
     const serialized = serializeBlogDocument(doc);
     lastEmittedRef.current = serialized;
+    isInternalChange.current = true;
     onChange?.(serialized);
+    // Reset the flag after a microtask
+    const timer = setTimeout(() => { isInternalChange.current = false; }, 0);
+    return () => clearTimeout(timer);
   }, [doc, onChange]);
 
   useEffect(() => {
@@ -196,7 +205,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
     }, 0);
   }, [doc]);
 
-  const selected = useMemo(() => doc.elements.find((element) => element.id === selectedId) || null, [doc.elements, selectedId]);
+  const selected = useMemo(() => doc.elements.find((el) => el.id === selectedId) || null, [doc.elements, selectedId]);
   const selectedCanContain = canContainChildren(selected);
 
   const commitDoc = useCallback((updater, { history = true } = {}) => {
@@ -214,7 +223,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   const updateElement = useCallback((id, patch, options) => {
     commitDoc((prev) => ({
       ...prev,
-      elements: prev.elements.map((element) => (element.id === id ? normalizeElement({ ...element, ...patch }) : element)),
+      elements: prev.elements.map((el) => (el.id === id ? normalizeElement({ ...el, ...patch }) : el)),
     }), options);
   }, [commitDoc]);
 
@@ -227,7 +236,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   const duplicateElement = useCallback((id = selectedId) => {
     if (!id) return;
     const current = docRef.current;
-    const source = current.elements.find((element) => element.id === id);
+    const source = current.elements.find((el) => el.id === id);
     if (!source) return;
     const clones = cloneElementTree(current.elements, id, source.parentId);
     commitDoc((prev) => ({ ...prev, elements: [...prev.elements, ...clones] }));
@@ -237,18 +246,17 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   const reorderElement = useCallback((direction) => {
     if (!selectedId) return;
     commitDoc((prev) => {
-      const siblings = prev.elements.filter((element) => {
-        const selectedElement = prev.elements.find((item) => item.id === selectedId);
-        return selectedElement && (element.parentId || null) === (selectedElement.parentId || null);
+      const siblings = prev.elements.filter((el) => {
+        const sel = prev.elements.find((item) => item.id === selectedId);
+        return sel && (el.parentId || null) === (sel.parentId || null);
       });
-      const minZ = Math.min(...siblings.map((element) => element.z), 1);
-      const maxZ = Math.max(...siblings.map((element) => element.z), 1);
+      const minZ = Math.min(...siblings.map((el) => el.z), 1);
+      const maxZ = Math.max(...siblings.map((el) => el.z), 1);
       return {
         ...prev,
-        elements: prev.elements.map((element) => {
-          if (element.id !== selectedId) return element;
-          return { ...element, z: direction === 'front' ? maxZ + 1 : Math.max(1, minZ - 1) };
-        }),
+        elements: prev.elements.map((el) =>
+          el.id === selectedId ? { ...el, z: direction === 'front' ? maxZ + 1 : Math.max(1, minZ - 1) } : el
+        ),
       };
     });
   }, [commitDoc, selectedId]);
@@ -276,9 +284,8 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
     const x = Math.max(0, Math.min(options.x ?? 36, Math.max(0, bounds.width - defaultW - 12)));
     const y = Math.max(0, Math.min(options.y ?? 36, Math.max(0, bounds.height - defaultH - 12)));
     const maxZ = current.elements
-      .filter((element) => (element.parentId || null) === (parentId || null))
-      .reduce((value, element) => Math.max(value, element.z), 0);
-
+      .filter((el) => (el.parentId || null) === (parentId || null))
+      .reduce((val, el) => Math.max(val, el.z), 0);
     const element = normalizeElement({
       id: createId(),
       parentId,
@@ -294,7 +301,6 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       background: type === 'html' ? '#ffffff' : undefined,
       borderWidth: type === 'html' ? 0 : undefined,
     });
-
     commitDoc((prev) => ({ ...prev, elements: [...prev.elements, element] }));
     setSelectedId(element.id);
     if (type !== 'image') pendingFocusRef.current = element.id;
@@ -318,7 +324,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
 
   const addImage = useCallback((src, forceNew = false) => {
     if (!src) return;
-    const currentSelected = docRef.current.elements.find((element) => element.id === selectedId);
+    const currentSelected = docRef.current.elements.find((el) => el.id === selectedId);
     if (currentSelected?.type === 'image' && !forceNew) {
       updateElement(currentSelected.id, { src });
       return;
@@ -327,12 +333,12 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   }, [addElement, selectedId, updateElement]);
 
   const handleFiles = useCallback(async (files) => {
-    const images = [...files].filter((file) => file.type.startsWith('image/'));
+    const images = [...files].filter((f) => f.type.startsWith('image/'));
     if (!images.length) return;
     setUploading(true);
     try {
-      for (const image of images) {
-        const url = await uploadImage(image);
+      for (const img of images) {
+        const url = await uploadImage(img);
         if (url) addImage(url, images.length > 1);
       }
       toast.success(`${images.length} image${images.length > 1 ? 's' : ''} uploaded`);
@@ -343,7 +349,6 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
     }
   }, [addImage, uploadImage]);
 
-  // Sync the active editable element's innerHTML back to our state
   const syncFocusedEditable = useCallback(() => {
     window.setTimeout(() => {
       const active = document.activeElement;
@@ -352,30 +357,24 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
     }, 0);
   }, [updateElement]);
 
-  // Central exec helper that works with contentEditable
   const exec = useCallback((command, value = null) => {
     document.execCommand(command, false, value);
     syncFocusedEditable();
   }, [syncFocusedEditable]);
 
-  // Alignment commands
   const setAlignment = useCallback((align) => {
-    const commandMap = {
+    const cmdMap = {
       left: 'justifyLeft',
       center: 'justifyCenter',
       right: 'justifyRight',
       justify: 'justifyFull',
     };
-    const command = commandMap[align];
-    if (command && document.activeElement?.getAttribute?.('data-editable-id')) {
-      exec(command);
-    }
-    if (selected && selected.type !== 'image') {
-      updateElement(selected.id, { textAlign: align });
-    }
+    const cmd = cmdMap[align];
+    if (cmd && document.activeElement?.getAttribute?.('data-editable-id')) exec(cmd);
+    if (selected && selected.type !== 'image') updateElement(selected.id, { textAlign: align });
   }, [exec, selected, updateElement]);
 
-  // ------------------------ formatting handlers with focus preservation ------------------------
+  // Formatting handlers
   const handleBold = (e) => { e.preventDefault(); exec('bold'); };
   const handleItalic = (e) => { e.preventDefault(); exec('italic'); };
   const handleUnderline = (e) => { e.preventDefault(); exec('underline'); };
@@ -386,19 +385,13 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   const handleQuote = (e) => { e.preventDefault(); exec('formatBlock', '<blockquote>'); };
   const handleBulletList = (e) => { e.preventDefault(); exec('insertUnorderedList'); };
   const handleOrderedList = (e) => { e.preventDefault(); exec('insertOrderedList'); };
-
-  // Link insertion with selection saving
   const handleLinkMouseDown = useCallback((e) => {
     e.preventDefault();
     const sel = window.getSelection();
-    if (sel.rangeCount > 0) {
-      savedRange.current = sel.getRangeAt(0);
-    }
-    // Delay the prompt so that the mousedown event can finish
+    if (sel.rangeCount > 0) savedRange.current = sel.getRangeAt(0);
     setTimeout(() => {
       const url = window.prompt('Link URL');
       if (url) {
-        // Restore the saved selection
         const sel = window.getSelection();
         if (savedRange.current) {
           sel.removeAllRanges();
@@ -409,36 +402,28 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       savedRange.current = null;
     }, 0);
   }, [exec]);
-
-  // Alignment handlers with focus preservation
   const handleAlignLeft = (e) => { e.preventDefault(); setAlignment('left'); };
   const handleAlignCenter = (e) => { e.preventDefault(); setAlignment('center'); };
   const handleAlignRight = (e) => { e.preventDefault(); setAlignment('right'); };
   const handleAlignJustify = (e) => { e.preventDefault(); setAlignment('justify'); };
 
-  // ------------------------ canvas events ------------------------
+  // Canvas events
   const onCanvasDoubleClick = (event) => {
     if (event.target.closest('[data-editor-element]')) return;
     event.preventDefault();
     addTextAtCanvasPoint(event.clientX, event.clientY);
   };
-
   const onCanvasPointerDown = (event) => {
     if (event.target === canvasRef.current) setSelectedId(null);
   };
-
   const startPointerAction = (event, element, action, handle = '') => {
     if (element.locked) return;
     event.preventDefault();
     event.stopPropagation();
     setSelectedId(element.id);
     setDragState({
-      action,
-      handle,
-      id: element.id,
-      beforeDoc: docRef.current,
-      startX: event.clientX,
-      startY: event.clientY,
+      action, handle, id: element.id, beforeDoc: docRef.current,
+      startX: event.clientX, startY: event.clientY,
       original: { x: element.x, y: element.y, w: element.w, h: element.h },
       parentBounds: getElementBounds(docRef.current, element.parentId),
       type: element.type,
@@ -446,8 +431,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   };
 
   useEffect(() => {
-    if (!dragState) return undefined;
-
+    if (!dragState) return;
     const onMove = (event) => {
       const dx = (event.clientX - dragState.startX) / zoom;
       const dy = (event.clientY - dragState.startY) / zoom;
@@ -455,55 +439,28 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       const parentW = dragState.parentBounds.width;
       const parentH = dragState.parentBounds.height;
       let { x, y, w, h } = dragState.original;
-
       if (dragState.action === 'move') {
         x = Math.round(Math.max(0, Math.min(parentW - Math.min(w, parentW), dragState.original.x + dx)));
         y = Math.round(Math.max(0, Math.min(parentH - Math.min(h, parentH), dragState.original.y + dy)));
       } else {
         if (dragState.handle.includes('e')) w = dragState.original.w + dx;
         if (dragState.handle.includes('s')) h = dragState.original.h + dy;
-        if (dragState.handle.includes('w')) {
-          x = dragState.original.x + dx;
-          w = dragState.original.w - dx;
-        }
-        if (dragState.handle.includes('n')) {
-          y = dragState.original.y + dy;
-          h = dragState.original.h - dy;
-        }
-
-        if (w < min.w) {
-          if (dragState.handle.includes('w')) x -= min.w - w;
-          w = min.w;
-        }
-        if (h < min.h) {
-          if (dragState.handle.includes('n')) y -= min.h - h;
-          h = min.h;
-        }
-        if (x < 0) {
-          w += x;
-          x = 0;
-        }
-        if (y < 0) {
-          h += y;
-          y = 0;
-        }
+        if (dragState.handle.includes('w')) { x = dragState.original.x + dx; w = dragState.original.w - dx; }
+        if (dragState.handle.includes('n')) { y = dragState.original.y + dy; h = dragState.original.h - dy; }
+        if (w < min.w) { if (dragState.handle.includes('w')) x -= min.w - w; w = min.w; }
+        if (h < min.h) { if (dragState.handle.includes('n')) y -= min.h - h; h = min.h; }
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
         if (x + w > parentW) w = parentW - x;
         if (y + h > parentH) h = parentH - y;
-
-        x = Math.round(x);
-        y = Math.round(y);
-        w = Math.round(Math.max(min.w, w));
-        h = Math.round(Math.max(min.h, h));
+        x = Math.round(x); y = Math.round(y); w = Math.round(Math.max(min.w, w)); h = Math.round(Math.max(min.h, h));
       }
-
       updateElement(dragState.id, { x, y, w, h }, { history: false });
     };
-
     const onUp = () => {
       setDragState(null);
       pastRef.current = [...pastRef.current.slice(-49), dragState.beforeDoc];
     };
-
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     return () => {
@@ -517,18 +474,14 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       if (isTypingTarget(event.target)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
-        if (event.shiftKey) redo();
-        else undo();
+        if (event.shiftKey) redo(); else undo();
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
         event.preventDefault();
         duplicateElement();
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (selectedId) {
-          event.preventDefault();
-          deleteElement();
-        }
+        if (selectedId) { event.preventDefault(); deleteElement(); }
       }
       if (event.key === 'Escape') setSelectedId(null);
     };
@@ -554,9 +507,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
   };
 
   const renderElement = (element) => {
-    const children = doc.elements
-      .filter((item) => (item.parentId || null) === element.id)
-      .sort((a, b) => a.z - b.z);
+    const children = doc.elements.filter((item) => (item.parentId || null) === element.id).sort((a, b) => a.z - b.z);
     const selectedElement = selectedId === element.id;
     const commonStyle = {
       left: `${element.x}px`,
@@ -566,7 +517,6 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       zIndex: element.z,
       opacity: element.opacity,
     };
-
     return (
       <div
         key={element.id}
@@ -574,61 +524,28 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
         data-element-id={element.id}
         className={`saas-editor-element ${selectedElement ? 'is-selected' : ''} ${element.locked ? 'is-locked' : ''}`}
         style={commonStyle}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-          setSelectedId(element.id);
-        }}
+        onPointerDown={(event) => { event.stopPropagation(); setSelectedId(element.id); }}
       >
         {selectedElement && (
           <div className="saas-editor-minibar" contentEditable={false}>
-            <button type="button" className="saas-editor-mini-button" title="Move" onPointerDown={(event) => startPointerAction(event, element, 'move')}>
-              <Move size={13} />
-            </button>
-            <button type="button" className="saas-editor-mini-button" title="Duplicate" onClick={() => duplicateElement(element.id)}>
-              <Copy size={13} />
-            </button>
+            <button type="button" className="saas-editor-mini-button" title="Move" onPointerDown={(event) => startPointerAction(event, element, 'move')}><Move size={13} /></button>
+            <button type="button" className="saas-editor-mini-button" title="Duplicate" onClick={() => duplicateElement(element.id)}><Copy size={13} /></button>
             <button type="button" className="saas-editor-mini-button" title={element.locked ? 'Unlock' : 'Lock'} onClick={() => updateElement(element.id, { locked: !element.locked })}>
               {element.locked ? <Unlock size={13} /> : <Lock size={13} />}
             </button>
-            <button type="button" className="saas-editor-mini-button" title="Delete" onClick={() => deleteElement(element.id)}>
-              <Trash2 size={13} />
-            </button>
+            <button type="button" className="saas-editor-mini-button" title="Delete" onClick={() => deleteElement(element.id)}><Trash2 size={13} /></button>
           </div>
         )}
-
         {element.type === 'image' ? (
-          <div
-            className="saas-editor-image-wrap"
-            style={{
-              borderRadius: `${element.radius}px`,
-              background: element.background,
-            }}
-          >
-            {element.src ? (
-              <img src={element.src} alt={element.alt || ''} style={{ objectFit: element.fit }} draggable={false} />
-            ) : (
-              <div className="saas-editor-placeholder">Upload or paste an image URL</div>
-            )}
+          <div className="saas-editor-image-wrap" style={{ borderRadius: `${element.radius}px`, background: element.background }}>
+            {element.src ? <img src={element.src} alt={element.alt || ''} style={{ objectFit: element.fit }} draggable={false} /> : <div className="saas-editor-placeholder">Upload or paste an image URL</div>}
           </div>
         ) : (
-          <div
-            className={element.type === 'html' ? 'saas-editor-html' : 'saas-editor-text'}
-            style={{
-              background: element.background,
-              border: `${element.borderWidth}px solid ${element.borderColor}`,
-              borderRadius: `${element.radius}px`,
-            }}
-          >
-            <EditableSurface
-              element={element}
-              selected={selectedElement}
-              onFocus={() => setSelectedId(element.id)}
-              onHtmlChange={(id, html) => updateElement(id, { html }, { history: false })}
-            />
+          <div className={element.type === 'html' ? 'saas-editor-html' : 'saas-editor-text'} style={{ background: element.background, border: `${element.borderWidth}px solid ${element.borderColor}`, borderRadius: `${element.radius}px` }}>
+            <EditableSurface element={element} selected={selectedElement} onFocus={() => setSelectedId(element.id)} onHtmlChange={(id, html) => updateElement(id, { html }, { history: false })} />
             {children.map(renderElement)}
           </div>
         )}
-
         {selectedElement && !element.locked && RESIZE_HANDLES.map((handle) => (
           <span key={handle} className={`saas-editor-resize-handle ${handle}`} onPointerDown={(event) => startPointerAction(event, element, 'resize', handle)} />
         ))}
@@ -636,7 +553,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
     );
   };
 
-  const rootElements = doc.elements.filter((element) => !element.parentId).sort((a, b) => a.z - b.z);
+  const rootElements = doc.elements.filter((el) => !el.parentId).sort((a, b) => a.z - b.z);
   const canEditText = selected && selected.type !== 'image';
 
   return (
@@ -644,40 +561,15 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       <div className="saas-editor-toolbar">
         <ToolbarButton icon={Type} label="Text" primary onClick={() => addElement('text', { parentId: null })} title="Add text box" />
         <ToolbarButton icon={Type} label="Nested" disabled={!selectedCanContain} onClick={() => addElement('text')} title="Add text box inside selected box" />
-        <ToolbarButton
-          icon={Code}
-          label="HTML"
-          onClick={() => {
-            const html = window.prompt('Paste HTML for this block:', '<p><strong>Custom HTML</strong></p>');
-            if (html) addElement('html', { html: sanitizeHtml(html), parentId: selectedCanContain ? selectedId : null });
-          }}
-          title="Add editable HTML block"
-        />
+        <ToolbarButton icon={Code} label="HTML" onClick={() => {
+          const html = window.prompt('Paste HTML for this block:', '<p><strong>Custom HTML</strong></p>');
+          if (html) addElement('html', { html: sanitizeHtml(html), parentId: selectedCanContain ? selectedId : null });
+        }} title="Add editable HTML block" />
         <ToolbarButton icon={Upload} label={uploading ? 'Uploading' : 'Image'} disabled={uploading} onClick={() => fileRef.current?.click()} title="Upload image" />
-        <ToolbarButton
-          icon={ImageIcon}
-          label="URL"
-          onClick={() => {
-            const url = window.prompt('Image URL');
-            if (url) addImage(url, true);
-          }}
-          title="Add image by URL"
-        />
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          hidden
-          onChange={(event) => {
-            const files = [...(event.target.files || [])];
-            event.target.value = '';
-            handleFiles(files);
-          }}
-        />
+        <ToolbarButton icon={ImageIcon} label="URL" onClick={() => { const url = window.prompt('Image URL'); if (url) addImage(url, true); }} title="Add image by URL" />
+        <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(event) => { const files = [...(event.target.files || [])]; event.target.value = ''; handleFiles(files); }} />
 
         <span className="saas-editor-divider" />
-        {/* Formatting buttons – now use onMouseDown to keep focus */}
         <ToolbarButton icon={Bold} onMouseDown={handleBold} title="Bold" />
         <ToolbarButton icon={Italic} onMouseDown={handleItalic} title="Italic" />
         <ToolbarButton icon={Underline} onMouseDown={handleUnderline} title="Underline" />
@@ -688,11 +580,7 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
         <ToolbarButton icon={Quote} onMouseDown={handleQuote} title="Quote" />
         <ToolbarButton icon={List} onMouseDown={handleBulletList} title="Bullet list" />
         <ToolbarButton icon={ListOrdered} onMouseDown={handleOrderedList} title="Numbered list" />
-        <ToolbarButton
-          icon={LinkIcon}
-          onMouseDown={handleLinkMouseDown}
-          title="Link"
-        />
+        <ToolbarButton icon={LinkIcon} onMouseDown={handleLinkMouseDown} title="Link" />
 
         <span className="saas-editor-divider" />
         <ToolbarButton icon={AlignLeft} active={selected?.textAlign === 'left'} onMouseDown={handleAlignLeft} title="Align left" />
@@ -700,33 +588,11 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
         <ToolbarButton icon={AlignRight} active={selected?.textAlign === 'right'} onMouseDown={handleAlignRight} title="Align right" />
         <ToolbarButton icon={AlignJustify} active={selected?.textAlign === 'justify'} onMouseDown={handleAlignJustify} title="Justify" />
 
-        <select
-          className="saas-editor-select"
-          value={canEditText ? selected.fontFamily : FONTS[0]}
-          disabled={!canEditText}
-          onChange={(event) => updateElement(selected.id, { fontFamily: event.target.value })}
-          title="Font family"
-        >
+        <select className="saas-editor-select" value={canEditText ? selected.fontFamily : FONTS[0]} disabled={!canEditText} onChange={(e) => updateElement(selected.id, { fontFamily: e.target.value })} title="Font family">
           {FONTS.map((font) => <option key={font} value={font}>{font.split(',')[0]}</option>)}
         </select>
-        <input
-          className="saas-editor-input"
-          type="number"
-          min="8"
-          max="96"
-          value={canEditText ? selected.fontSize : 18}
-          disabled={!canEditText}
-          onChange={(event) => updateElement(selected.id, { fontSize: parseNumberInput(event.target.value, selected.fontSize) })}
-          title="Font size"
-        />
-        <input
-          className="saas-editor-color"
-          type="color"
-          value={canEditText ? selected.color : '#111827'}
-          disabled={!canEditText}
-          onChange={(event) => updateElement(selected.id, { color: event.target.value })}
-          title="Text color"
-        />
+        <input className="saas-editor-input" type="number" min="8" max="96" value={canEditText ? selected.fontSize : 18} disabled={!canEditText} onChange={(e) => updateElement(selected.id, { fontSize: parseNumberInput(e.target.value, selected.fontSize) })} title="Font size" />
+        <input className="saas-editor-color" type="color" value={canEditText ? selected.color : '#111827'} disabled={!canEditText} onChange={(e) => updateElement(selected.id, { color: e.target.value })} title="Text color" />
 
         <span className="saas-editor-divider" />
         <ToolbarButton icon={BringToFront} disabled={!selected} onClick={() => reorderElement('front')} title="Bring to front" />
@@ -735,36 +601,18 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
         <ToolbarButton icon={Trash2} disabled={!selected} onClick={() => deleteElement()} title="Delete" />
 
         <span className="saas-editor-divider" />
-        <ToolbarButton icon={ZoomOut} onClick={() => setZoom((value) => Math.max(0.35, Number((value - 0.08).toFixed(2))))} title="Zoom out" />
+        <ToolbarButton icon={ZoomOut} onClick={() => setZoom((v) => Math.max(0.35, Number((v - 0.08).toFixed(2))))} title="Zoom out" />
         <span style={{ minWidth: 48, textAlign: 'center', fontSize: 12, color: '#475569' }}>{Math.round(zoom * 100)}%</span>
-        <ToolbarButton icon={ZoomIn} onClick={() => setZoom((value) => Math.min(1.4, Number((value + 0.08).toFixed(2))))} title="Zoom in" />
-        <ToolbarButton icon={Settings} active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} title="Toggle draggable sidebar" />
+        <ToolbarButton icon={ZoomIn} onClick={() => setZoom((v) => Math.min(1.4, Number((v + 0.08).toFixed(2))))} title="Zoom in" />
+        <ToolbarButton icon={Settings} active={inspectorOpen} onClick={() => setInspectorOpen((v) => !v)} title="Toggle draggable sidebar" />
       </div>
 
       <div className="saas-editor-workspace">
         <div className="saas-editor-stage-spacer" style={{ width: doc.width * zoom, height: doc.height * zoom }}>
-          <div
-            ref={canvasRef}
-            className="saas-editor-canvas"
-            style={{
-              width: doc.width,
-              height: doc.height,
-              background: doc.background,
-              transform: `scale(${zoom})`,
-            }}
-            onDoubleClick={onCanvasDoubleClick}
-            onPointerDown={onCanvasPointerDown}
-            onDrop={(event) => {
-              event.preventDefault();
-              handleFiles(event.dataTransfer.files || []);
-            }}
-            onDragOver={(event) => event.preventDefault()}
-          >
-            {rootElements.length === 0 && (
-              <div className="saas-editor-placeholder">
-                Double click anywhere to start writing. Add images, text boxes, HTML blocks, and nested elements from the toolbar.
-              </div>
-            )}
+          <div ref={canvasRef} className="saas-editor-canvas" style={{ width: doc.width, height: doc.height, background: doc.background, transform: `scale(${zoom})` }}
+            onDoubleClick={onCanvasDoubleClick} onPointerDown={onCanvasPointerDown}
+            onDrop={(e) => { e.preventDefault(); handleFiles(e.dataTransfer.files || []); }} onDragOver={(e) => e.preventDefault()}>
+            {rootElements.length === 0 && <div className="saas-editor-placeholder">Double click anywhere to start writing. Add images, text boxes, HTML blocks, and nested elements from the toolbar.</div>}
             {rootElements.map(renderElement)}
           </div>
         </div>
@@ -773,13 +621,8 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
       {inspectorOpen && (
         <div className="saas-editor-inspector" style={{ left: inspectorPos.x, top: inspectorPos.y }}>
           <div className="saas-editor-inspector-head" onPointerDown={startInspectorDragFixed}>
-            <div className="saas-editor-inspector-title">
-              <Settings size={14} />
-              {selected ? `${selected.type} settings` : 'Document settings'}
-            </div>
-            <button type="button" className="saas-editor-mini-button" style={{ color: '#475569' }} onClick={() => setInspectorOpen(false)}>
-              X
-            </button>
+            <div className="saas-editor-inspector-title"><Settings size={14} />{selected ? `${selected.type} settings` : 'Document settings'}</div>
+            <button type="button" className="saas-editor-mini-button" style={{ color: '#475569' }} onClick={() => setInspectorOpen(false)}>X</button>
           </div>
           <div className="saas-editor-inspector-body">
             {selected ? (
@@ -789,86 +632,45 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
                   <button type="button" className="saas-editor-action" onClick={() => reorderElement('front')}><Layers size={13} />Front</button>
                   <button type="button" className="saas-editor-action danger" onClick={() => deleteElement()}><Trash2 size={13} />Delete</button>
                 </div>
-
                 <div className="saas-editor-field-grid">
-                  {['x', 'y', 'w', 'h'].map((field) => (
+                  {['x', 'y', 'w', 'h'].map(field => (
                     <Field key={field} label={field.toUpperCase()}>
-                      <input type="number" value={selected[field]} onChange={(event) => updateElement(selected.id, { [field]: parseNumberInput(event.target.value, selected[field]) })} />
+                      <input type="number" value={selected[field]} onChange={(e) => updateElement(selected.id, { [field]: parseNumberInput(e.target.value, selected[field]) })} />
                     </Field>
                   ))}
                 </div>
-
                 <div className="saas-editor-field-grid">
-                  <Field label="Z index">
-                    <input type="number" value={selected.z} onChange={(event) => updateElement(selected.id, { z: parseNumberInput(event.target.value, selected.z) })} />
-                  </Field>
-                  <Field label="Opacity">
-                    <input type="number" min="0.1" max="1" step="0.05" value={selected.opacity} onChange={(event) => updateElement(selected.id, { opacity: parseNumberInput(event.target.value, selected.opacity) })} />
-                  </Field>
+                  <Field label="Z index"><input type="number" value={selected.z} onChange={(e) => updateElement(selected.id, { z: parseNumberInput(e.target.value, selected.z) })} /></Field>
+                  <Field label="Opacity"><input type="number" min="0.1" max="1" step="0.05" value={selected.opacity} onChange={(e) => updateElement(selected.id, { opacity: parseNumberInput(e.target.value, selected.opacity) })} /></Field>
                 </div>
-
                 <div className="saas-editor-field-grid">
-                  <Field label="Radius">
-                    <input type="number" min="0" value={selected.radius} onChange={(event) => updateElement(selected.id, { radius: parseNumberInput(event.target.value, selected.radius) })} />
-                  </Field>
-                  <Field label="Locked">
-                    <select value={selected.locked ? 'yes' : 'no'} onChange={(event) => updateElement(selected.id, { locked: event.target.value === 'yes' })}>
-                      <option value="no">No</option>
-                      <option value="yes">Yes</option>
-                    </select>
-                  </Field>
+                  <Field label="Radius"><input type="number" min="0" value={selected.radius} onChange={(e) => updateElement(selected.id, { radius: parseNumberInput(e.target.value, selected.radius) })} /></Field>
+                  <Field label="Locked"><select value={selected.locked ? 'yes' : 'no'} onChange={(e) => updateElement(selected.id, { locked: e.target.value === 'yes' })}><option value="no">No</option><option value="yes">Yes</option></select></Field>
                 </div>
-
                 {selected.type === 'image' ? (
                   <>
-                    <Field label="Image URL">
-                      <input value={selected.src} onChange={(event) => updateElement(selected.id, { src: event.target.value })} />
-                    </Field>
-                    <Field label="Alt text">
-                      <input value={selected.alt || ''} onChange={(event) => updateElement(selected.id, { alt: event.target.value })} />
-                    </Field>
+                    <Field label="Image URL"><input value={selected.src} onChange={(e) => updateElement(selected.id, { src: e.target.value })} /></Field>
+                    <Field label="Alt text"><input value={selected.alt || ''} onChange={(e) => updateElement(selected.id, { alt: e.target.value })} /></Field>
                     <div className="saas-editor-field-grid">
-                      <Field label="Fit">
-                        <select value={selected.fit} onChange={(event) => updateElement(selected.id, { fit: event.target.value })}>
-                          <option value="contain">Contain</option>
-                          <option value="cover">Cover</option>
-                          <option value="fill">Fill</option>
-                        </select>
-                      </Field>
-                      <Field label="Background">
-                        <input type="color" value={colorInputValue(selected.background)} onChange={(event) => updateElement(selected.id, { background: event.target.value })} />
-                      </Field>
+                      <Field label="Fit"><select value={selected.fit} onChange={(e) => updateElement(selected.id, { fit: e.target.value })}><option value="contain">Contain</option><option value="cover">Cover</option><option value="fill">Fill</option></select></Field>
+                      <Field label="Background"><input type="color" value={colorInputValue(selected.background)} onChange={(e) => updateElement(selected.id, { background: e.target.value })} /></Field>
                     </div>
                   </>
                 ) : (
                   <>
                     <div className="saas-editor-field-grid">
-                      <Field label="Font size">
-                        <input type="number" min="8" max="96" value={selected.fontSize} onChange={(event) => updateElement(selected.id, { fontSize: parseNumberInput(event.target.value, selected.fontSize) })} />
-                      </Field>
-                      <Field label="Padding">
-                        <input type="number" min="0" value={selected.padding} onChange={(event) => updateElement(selected.id, { padding: parseNumberInput(event.target.value, selected.padding) })} />
-                      </Field>
+                      <Field label="Font size"><input type="number" min="8" max="96" value={selected.fontSize} onChange={(e) => updateElement(selected.id, { fontSize: parseNumberInput(e.target.value, selected.fontSize) })} /></Field>
+                      <Field label="Padding"><input type="number" min="0" value={selected.padding} onChange={(e) => updateElement(selected.id, { padding: parseNumberInput(e.target.value, selected.padding) })} /></Field>
                     </div>
                     <div className="saas-editor-field-grid">
-                      <Field label="Text">
-                        <input type="color" value={selected.color} onChange={(event) => updateElement(selected.id, { color: event.target.value })} />
-                      </Field>
-                      <Field label="Background">
-                        <input type="color" value={colorInputValue(selected.background)} onChange={(event) => updateElement(selected.id, { background: event.target.value })} />
-                      </Field>
+                      <Field label="Text"><input type="color" value={selected.color} onChange={(e) => updateElement(selected.id, { color: e.target.value })} /></Field>
+                      <Field label="Background"><input type="color" value={colorInputValue(selected.background)} onChange={(e) => updateElement(selected.id, { background: e.target.value })} /></Field>
                     </div>
                     <div className="saas-editor-field-grid">
-                      <Field label="Border">
-                        <input type="number" min="0" value={selected.borderWidth} onChange={(event) => updateElement(selected.id, { borderWidth: parseNumberInput(event.target.value, selected.borderWidth) })} />
-                      </Field>
-                      <Field label="Border color">
-                        <input type="color" value={selected.borderColor} onChange={(event) => updateElement(selected.id, { borderColor: event.target.value })} />
-                      </Field>
+                      <Field label="Border"><input type="number" min="0" value={selected.borderWidth} onChange={(e) => updateElement(selected.id, { borderWidth: parseNumberInput(e.target.value, selected.borderWidth) })} /></Field>
+                      <Field label="Border color"><input type="color" value={selected.borderColor} onChange={(e) => updateElement(selected.id, { borderColor: e.target.value })} /></Field>
                     </div>
-                    <Field label="Raw HTML">
-                      <textarea value={selected.html} onChange={(event) => updateElement(selected.id, { html: sanitizeHtml(event.target.value) })} />
-                    </Field>
+                    <Field label="Raw HTML"><textarea value={selected.html} onChange={(e) => updateElement(selected.id, { html: sanitizeHtml(e.target.value) })} /></Field>
                     <div className="saas-editor-actions">
                       <button type="button" className="saas-editor-action" onClick={() => addElement('text')}><Type size={13} />Nested text</button>
                       <button type="button" className="saas-editor-action" onClick={() => fileRef.current?.click()}><ImageIcon size={13} />Image inside</button>
@@ -880,20 +682,11 @@ const RichTextEditor = ({ content = '', onChange, uploadEndpoint = '/upload-blog
               <>
                 <p className="saas-editor-muted">Double click the page to create a text box at that exact point. Select any element to move, resize, layer, style, or nest items inside it.</p>
                 <div className="saas-editor-field-grid">
-                  <Field label="Width">
-                    <input type="number" value={doc.width} onChange={(event) => commitDoc((prev) => ({ ...prev, width: parseNumberInput(event.target.value, prev.width) }))} />
-                  </Field>
-                  <Field label="Height">
-                    <input type="number" value={doc.height} onChange={(event) => commitDoc((prev) => ({ ...prev, height: parseNumberInput(event.target.value, prev.height) }))} />
-                  </Field>
+                  <Field label="Width"><input type="number" value={doc.width} onChange={(e) => commitDoc((prev) => ({ ...prev, width: parseNumberInput(e.target.value, prev.width) }))} /></Field>
+                  <Field label="Height"><input type="number" value={doc.height} onChange={(e) => commitDoc((prev) => ({ ...prev, height: parseNumberInput(e.target.value, prev.height) }))} /></Field>
                 </div>
-                <Field label="Page background">
-                  <input type="color" value={doc.background} onChange={(event) => commitDoc((prev) => ({ ...prev, background: event.target.value }))} />
-                </Field>
-                <div className="saas-editor-actions">
-                  <button type="button" className="saas-editor-action" onClick={undo}>Undo</button>
-                  <button type="button" className="saas-editor-action" onClick={redo}>Redo</button>
-                </div>
+                <Field label="Page background"><input type="color" value={doc.background} onChange={(e) => commitDoc((prev) => ({ ...prev, background: e.target.value }))} /></Field>
+                <div className="saas-editor-actions"><button type="button" className="saas-editor-action" onClick={undo}>Undo</button><button type="button" className="saas-editor-action" onClick={redo}>Redo</button></div>
               </>
             )}
           </div>
